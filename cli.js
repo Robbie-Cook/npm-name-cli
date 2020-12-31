@@ -3,21 +3,27 @@
 const meow = require('meow');
 const logSymbols = require('log-symbols');
 const chalk = require('chalk');
-const squatter = require('squatter');
-const npmName = require('npm-name');
 const terminalLink = require('terminal-link');
 const ora = require('ora');
-const organizationRegex = require('org-regex')({exact: true});
+const {getSimilarPackageNames, checkNames} = require('./util');
 
-const cli = meow(`
+const cli = meow(
+	`
 	Usage
-	  $ npm-name <name> …
+		$ npm-name <name> …
+
+	Options
+		--similar  Find similar package names
 
 	Examples
 	  $ npm-name chalk
 	  ${logSymbols.error} ${chalk.bold('chalk')} is unavailable
 	  $ npm-name abc123
 	  ${logSymbols.warning} ${chalk.bold('abc123')} is squatted
+	  $ npm-name --similar bigiron
+		${logSymbols.warning} ${chalk.bold('bigiron')} is unavailable
+		\nSimilar names:\n
+		${logSymbols.success} ${chalk.bold('bigcactus')} is available;
 	  $ npm-name unicorn-cake
 	  ${logSymbols.success} ${chalk.bold('unicorn-cake')} is available
 	  $ npm-name @ava
@@ -29,7 +35,15 @@ const cli = meow(`
 	  ${logSymbols.success} ${chalk.bold('unicorn-cake')} is available
 
 	Exits with code 0 when all names are available or 2 when any names are taken
-`);
+`,
+	{
+		flags: {
+			similar: {
+				type: 'boolean'
+			}
+		}
+	}
+);
 
 const {input} = cli;
 
@@ -40,6 +54,7 @@ if (input.length === 0) {
 
 function log(pkg) {
 	const styledName = chalk.bold(pkg.name);
+
 	const linkedName = pkg.isOrganization ?
 		terminalLink(styledName, `https://www.npmjs.com/org/${pkg.name.slice(1)}`) :
 		terminalLink(styledName, `https://www.npmjs.com/package/${pkg.name}`);
@@ -53,28 +68,59 @@ function log(pkg) {
 	}
 }
 
-const spinner = ora(`Checking ${input.length === 1 ? 'name' : 'names'} on npmjs.com…`).start();
+// Main
+
+const spinner = ora(
+	`Checking ${input.length === 1 ? 'name' : 'names'} on npmjs.com…`
+).start();
 
 (async () => {
-	const result = await npmName.many(input);
-
-	const packages = await Promise.all([...result].map(async ([name, isAvailable]) => {
-		const ret = {name, isAvailable, isOrganization: organizationRegex.test(name)};
-
-		if (!isAvailable && !ret.isOrganization) {
-			ret.isSquatter = await squatter(ret.name);
-		}
-
-		return ret;
-	}));
-
+	const packages = await checkNames(input);
 	spinner.stop();
 
-	for (const pkg of packages) {
-		log(pkg);
+	if (packages) {
+		for (const pkg of packages) {
+			log(pkg);
+
+			// Check similar names
+			if (cli.flags.similar) {
+				const secondSpinner = ora(
+					'Checking for similar names on npmjs.com…'
+				).start();
+
+				const similarNames = await getSimilarPackageNames(pkg);
+				if (similarNames) {
+					const similarNamesArray = similarNames;
+
+					let similarPackages = await checkNames(similarNamesArray);
+					if (similarPackages) {
+						similarPackages = similarPackages.filter(
+							thing => thing.isAvailable
+						);
+					}
+
+					secondSpinner.stop();
+					if (similarPackages && similarPackages.length > 0) {
+						console.log('\nSimilar names:\n');
+						for (const item of similarPackages) {
+							log(item);
+						}
+					} else {
+						secondSpinner.stop();
+						console.log('\nNo similar packages found.');
+					}
+				}
+
+				secondSpinner.stop();
+			}
+		}
+
+		process.exit(
+			packages.every(pkg => Boolean(pkg.isAvailable || pkg.isSquatter)) ? 0	: 2
+		);
 	}
 
-	process.exit(packages.every(pkg => Boolean(pkg.isAvailable || pkg.isSquatter)) ? 0 : 2);
+	process.exit(0);
 })().catch(error => {
 	spinner.stop();
 	console.error(error);
